@@ -125,3 +125,13 @@ backbone or new watermark keys).
 | WIP RL | uniform [1e6, 1e9], unique | disjoint from KD keys |
 | SA KD | 100000 + 10000*shard + idx | seed doubles as secret-sampling seed |
 | SA RL | 300000+i / 400000+i | secrets uniform over A-Z, len {18,19,20} |
+
+## Reproducibility note
+
+The `common/` builders are deterministic given their inputs: rebuilding the
+single-task KD/RL parquets from the paper-era intermediate artifacts
+reproduces all six released training parquets byte-for-byte (the released
+initials rows use the clean `prompt_ref` produced by
+`assemble_mixed_train_parquet.py`). vLLM sampling in the synthesis stage is
+not bit-exact across vLLM/driver versions, so a from-scratch resynthesis
+yields statistically equivalent but not identical corpora.
