@@ -1,0 +1,302 @@
+# Stage 2 Watermark RL config — GRPO + per-sample sequence reward
+#
+# Start from v5b checkpoint (weak/medium capability); RL amplifies it by
+# rewarding sequence-level z-score on green + initials tasks.
+#
+# No ref model, no KL-in-reward, no per-token KD losses. Pure sequence reward.
+
+defaults:
+  - actor@actor_rollout_ref.actor: dp_actor
+  # ref defaults chain (added 2026-05-25 to support clean-ref KL): pulls
+  # ref/dp_ref.yaml which inherits ref/ref.yaml + engine/fsdp.yaml, giving us
+  # _target_ markers + log_prob_micro_batch_size + every fsdp engine field.
+  - ref@actor_rollout_ref.ref: dp_ref
+  - data@data: legacy_data
+  - reward_manager@reward_manager
+  - rollout@actor_rollout_ref.rollout: rollout
+  - model@actor_rollout_ref.model: hf_model
+  - critic@critic: dp_critic
+  - reward_model@reward_model: dp_reward_model
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: true
+  nccl_timeout: 600
+
+  model:
+    path: ???
+    use_remove_padding: true
+    external_lib: null
+    enable_gradient_checkpointing: true
+    trust_remote_code: true
+    use_liger: true
+
+  actor:
+    strategy: fsdp2
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 65536
+    ppo_mini_batch_size: 8        # one optimizer step per batch (matches train_batch_size × rollout.n)
+    ppo_micro_batch_size_per_gpu: null   # let dynamic bsz pick
+    entropy_coeff: 0.0
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28       # DAPO-style asymmetric clip (slight)
+    loss_agg_mode: token-mean
+
+    optim:
+      lr_scheduler_type: constant
+      lr: 1.0e-6
+      weight_decay: 0.0
+      lr_warmup_steps_ratio: 0.0
+      min_lr_ratio: 0.1
+      total_training_steps: null
+
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+      fsdp_size: -1
+      model_dtype: bfloat16
+
+    checkpoint:
+      _target_: verl.trainer.config.CheckpointConfig
+      save_contents: ["model", "optimizer", "extra"]
+      load_contents: ["model", "optimizer", "extra"]
+
+  rollout:
+    name: vllm
+    mode: async
+    temperature: 1.0
+    top_k: -1
+    top_p: 0.9
+    response_length: 600          # match data.max_response_length (post-rollout tensor shape)
+    prompt_length: 60000          # match data.max_prompt_length (post-rollout tensor shape)
+    dtype: bfloat16
+    gpu_memory_utilization: 0.90
+    tensor_model_parallel_size: 8
+    enforce_eager: false
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
+    free_cache_engine: true
+    load_format: dummy
+    disable_log_stats: true
+    skip_tokenizer_init: true
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_max_token_len_per_gpu: 65536   # must ≥ prompt_length + response_length (=60600)
+    log_prob_use_dynamic_bsz: true
+    max_num_batched_tokens: 131072
+    max_num_seqs: 256
+    max_model_len: 131072
+    n: 4
+    do_sample: true
+    calculate_log_probs: false
+
+    engine_kwargs:
+      vllm:
+        hf_overrides:
+          max_position_embeddings: 131072
+          rope_scaling:
+            rope_type: yarn
+            factor: 4.0
+            original_max_position_embeddings: 40960
+
+    val_kwargs:
+      _target_: verl.workers.config.SamplingConfig
+      top_k: -1
+      top_p: 0.9
+      temperature: 1.0
+      n: 1
+      do_sample: true
+
+    agent:
+      _target_: verl.workers.config.AgentLoopConfig
+      num_workers: 8
+      default_agent_loop: raw_prompt_ids_agent
+      agent_loop_config_path: recipe/watermark_rl_ray/config/agent_loops.yaml
+
+  ref:
+    # Full ref config comes from defaults (ref@actor_rollout_ref.ref: dp_ref).
+    # Only override the few fields we care about; everything else (including
+    # _target_ markers, log_prob_micro_batch_size stubs, fsdp engine schema)
+    # is provided by ref/dp_ref.yaml + engine/fsdp.yaml.
+    fsdp_config:
+      param_offload: true
+      model_dtype: bfloat16
+    log_prob_max_token_len_per_gpu: 65536
+    log_prob_use_dynamic_bsz: true
+
+# ---- Reward settings ----
+reward:
+  active_tasks: ["green", "initials"]     # acrostics not trained yet
+  strength: 2.0
+  only_english: true
+  stats_file: /home/tianyichen/llm_watermark/data/initials_icw/leading_space_first_letter_stats.json
+  # Validation (fixed config) — z-score computed with these eval seeds across all val prompts
+  eval_green_seed: 0
+  eval_green_fraction: 0.25
+  eval_initials_seed: 0
+  # acrostic target is per-sample, read from data.non_tensor_batch['acrostic_target']
+  # in reward fn — no code/yaml default (2026-05-02 refactor; see commit notes).
+  acrostics_n_resample: 1000          # match KD eval (LCS @ 1000); 200 was hits-z hot path
+  acrostics_detector_kind: "lcs"      # 'lcs' (extractor='md', LCS+shuffle-S) or 'hits' (controller-walk)
+
+# ---- Data ----
+data:
+  train_files: ???
+  val_files: ???
+  train_batch_size: 2             # prompts per step; × rollout.n must ≥ world_size (=8)
+  val_batch_size: null
+  train_max_samples: -1
+  val_max_samples: -1
+  max_length: 60600
+  max_prompt_length: 60000
+  max_response_length: 600
+  dataloader_num_workers: 4
+  validation_shuffle: false
+  trust_remote_code: false
+  prompt_column: prompt
+  truncation: left        # val RLHFDataset truncates over-long prompts (keep user query tail)
+  return_raw_chat: true
+
+  train_data_num_samples: null
+  val_data_num_samples: null
+  shuffle: true
+  seed: 42
+  sampler: null
+
+# ---- Trainer ----
+trainer:
+  # Default ckpt save root: external 14TB /scr/tianyichen/ (mirrored on
+  # main-box and itml-1). Override via trainer.default_local_dir=... if
+  # launching on a host without /scr/tianyichen/.
+  default_local_dir: /scr/tianyichen/checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  default_hdfs_dir: null
+  project_name: watermark-rl-ray
+  experiment_name: test
+  total_epochs: 2
+  total_training_steps: null
+  logger: ["console", "wandb"]
+  log_val_generations: 0
+  validation_data_dir: null
+  rollout_data_dir: null
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: -1
+  test_freq: -1
+  resume_mode: auto
+  resume_from_path: null
+  val_before_train: false
+  val_only: false
+  device: cuda
+  use_legacy_worker_impl: auto
+  ray_wait_register_center_timeout: 300
+  del_local_ckpt_after_load: false
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  balance_batch: false
+  critic_warmup: 0
+  esi_redundant_time: 0
+
+# ---- Disabled components ----
+critic:
+  enable: false
+  strategy: fsdp
+  use_dynamic_bsz: true
+  ppo_max_token_len_per_gpu: 65536
+  optim:
+    lr: 1.0e-5
+    total_training_steps: null
+  fsdp_config:
+    param_offload: false
+    optimizer_offload: false
+    fsdp_size: -1
+  checkpoint:
+    _target_: verl.trainer.config.CheckpointConfig
+    save_contents: ["model", "optimizer", "extra"]
+    load_contents: ["model", "optimizer", "extra"]
+
+reward_model:
+  enable: false
+  model:
+    path: null
+  strategy: fsdp
+  micro_batch_size: null
+  micro_batch_size_per_gpu: null
+  enable_resource_pool: false
+  n_gpus_per_node: 8
+  nnodes: 1
+  reward_manager: noop
+
+algorithm:
+  _target_: verl.trainer.config.AlgoConfig
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+  kl_penalty: kl
+  kl_ctrl:
+    _target_: verl.trainer.config.KLControlConfig
+    type: fixed
+    kl_coef: 0.0
+    horizon: 10000
+    target_kl: 0.1
+  use_pf_ppo: false
+  pf_ppo:
+    reweight_method: pow
+    weight_pow: 2.0
+  rollout_correction:
+    rollout_is: null
+    rollout_is_threshold: 2.0
+    rollout_rs: null
+    rollout_rs_threshold: null
+    rollout_rs_threshold_lower: null
+    rollout_token_veto_threshold: null
+    bypass_mode: false
+    use_policy_gradient: false
+    rollout_is_batch_normalize: false
+
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: "outputs/profile"
+  global_tool_config:
+    nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
+      discrete: false
+      controller_nsight_options:
+        trace: "cuda,nvtx,cublas,ucx"
+        cuda-memory-usage: "true"
+        cuda-graph-trace: "graph"
+      worker_nsight_options:
+        trace: "cuda,nvtx,cublas,ucx"
+        cuda-memory-usage: "true"
+        cuda-graph-trace: "graph"
+        capture-range: "cudaProfilerApi"
+        capture-range-end: null
+        kill: none
+    torch_memory:
+      trace_alloc_max_entries: 100_000
+      stack_depth: 32
+      context: "all"
+      stacks: "all"
+      kw_args: {}
+
+transfer_queue:
+  enable: false
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null
+
+custom_reward_function:
+  path: null
+  name: compute_score
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config

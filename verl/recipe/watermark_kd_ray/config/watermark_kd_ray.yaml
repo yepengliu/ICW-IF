@@ -1,0 +1,343 @@
+# Watermark KD Ray Trainer Config
+#
+# Inherits the PPO trainer config structure so that RayPPOTrainer infrastructure
+# (worker groups, checkpoint, _validate) works unchanged.
+# PPO-specific fields (critic, reward_model, algorithm.kl) are disabled.
+#
+# NOTE: rollout is ONLY used in _validate() → generate_sequences() for z-score eval.
+# No online data collection happens during training.
+
+defaults:
+  - actor@actor_rollout_ref.actor: dp_actor
+  - data@data: legacy_data
+  - reward_manager@reward_manager
+  - ref@actor_rollout_ref.ref: dp_ref
+  - rollout@actor_rollout_ref.rollout: rollout
+  - model@actor_rollout_ref.model: hf_model
+  - critic@critic: dp_critic
+  - reward_model@reward_model: dp_reward_model
+  - _self_
+
+# ---- Actor / Rollout / Ref ----
+actor_rollout_ref:
+  hybrid_engine: true
+  nccl_timeout: 600
+
+  model:
+    path: ???
+    use_remove_padding: true
+    external_lib: null
+    enable_gradient_checkpointing: true
+    trust_remote_code: true
+    use_liger: true
+
+  actor:
+    strategy: fsdp2
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 65536
+
+    # Optimizer
+    optim:
+      lr_scheduler_type: constant
+      lr: 1.0e-5
+      weight_decay: 0.0
+      lr_warmup_steps_ratio: 0.05
+      min_lr_ratio: 0.1
+      total_training_steps: null
+
+    # FSDP config
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+      fsdp_size: -1
+      model_dtype: bfloat16
+
+    # Checkpoint
+    checkpoint:
+      _target_: verl.trainer.config.CheckpointConfig
+      save_contents: ["model", "optimizer", "extra"]
+      load_contents: ["model", "optimizer", "extra"]
+
+  # Rollout (vLLM) — used ONLY for _validate(), not for training data collection
+  rollout:
+    name: vllm
+    mode: async
+    temperature: 1.0
+    top_k: -1
+    top_p: 0.9
+    response_length: 600
+    prompt_length: 81920
+    dtype: bfloat16
+    gpu_memory_utilization: 0.95
+    tensor_model_parallel_size: 8
+    enforce_eager: false
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
+    free_cache_engine: true
+    load_format: dummy
+    disable_log_stats: true
+    skip_tokenizer_init: true
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_max_token_len_per_gpu: 32768
+    log_prob_use_dynamic_bsz: false
+    max_num_batched_tokens: 131072
+    max_num_seqs: 256
+    max_model_len: 131072
+    n: 1
+    do_sample: true
+    calculate_log_probs: false
+
+    engine_kwargs:
+      vllm:
+        hf_overrides:
+          max_position_embeddings: 131072
+          rope_scaling:
+            rope_type: yarn
+            factor: 4.0
+            original_max_position_embeddings: 40960
+
+    # Val generation params
+    val_kwargs:
+      _target_: verl.workers.config.SamplingConfig
+      top_k: -1
+      top_p: 0.9
+      temperature: 1.0
+      n: 1
+      do_sample: true
+
+    agent:
+      _target_: verl.workers.config.AgentLoopConfig
+      num_workers: 8
+      # Use raw_prompt_ids_agent so val uses the pre-tokenized prompt directly
+      # (which already includes the green token list + <think></think> no-think
+      # suppression), instead of re-applying apply_chat_template.
+      default_agent_loop: raw_prompt_ids_agent
+      agent_loop_config_path: recipe/watermark_kd_ray/config/agent_loops.yaml
+
+  # Ref model (co-located, frozen) — loaded by ActorRolloutRefWorker when role=actor_rollout_ref
+  ref:
+    fsdp_config:
+      param_offload: true
+      model_dtype: bfloat16
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_max_token_len_per_gpu: 65536
+    log_prob_use_dynamic_bsz: false
+
+# ---- Watermark config ----
+watermark:
+  # Default per-sample task for back-compat parquets that don't have a "task"
+  # column (all pos → this; all neg → "neg"). Set per-sample "task" in parquet
+  # for mixed-task training.
+  mode: green
+  stats_file: data/initials_icw/leading_space_first_letter_stats.json  # initials γ lookup
+  strength: 4.0
+  only_english: true
+  ce_loss_weight: 1.0
+  green_loss_weight: 1.0
+  kl_biased_ref_actor_weight: 0.0         # KL(D̂_ref ‖ D_actor): biased ref as teacher (mean-seeking)
+  reverse_kl_biased_ref_actor_weight: 0.0 # KL(D_actor ‖ D̂_ref): reverse biased ref (mode-seeking)
+  kl_ref_actor_weight: 0.0                # KL(D_ref  ‖ D_actor): forward quality anchor
+  reverse_kl_ref_actor_weight: 0.0       # KL(D_actor ‖ D_ref): reverse quality anchor
+  kl_biased_actor_actor_weight: 0.0              # KL(stopgrad(D̂_actor) ‖ D_actor): forward self-distill
+  reverse_kl_biased_actor_actor_weight: 0.0     # KL(D_actor ‖ stopgrad(D̂_actor)): reverse self-distill
+  quality_green_topk: 0                        # >0: self-distill uses green ∩ ref_topk bias (needs ref)
+  distill_topk_biased_ref: 0                   # >0: biased-ref KL (fwd+rev) computed on per-position top-K of biased teacher within english (needs ref)
+  # Green active-mask KD (green positives only). none=legacy full-response biased KL;
+  # mask=biased-teacher KL only at green-token (target-is-green) positions, non-active
+  # untrained (fluency from clean negs); cleanref=mask + clean-ref KL at non-green
+  # positions. Mirrors initials active-mask; goal = stop inheriting watermarked-teacher
+  # full-text quality degradation. Requires loss_normalization_mode=per_task.
+  green_active_mode: none                       # none | mask | cleanref
+  green_target_ratio: 0.0            # fraction-relative hinge; 0.0 = disabled. E.g. 2.0 means target = 2 * fraction_i per sample
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 1
+
+  # Optional per-task strength override for biased-ref construction.
+  # NOT set by default — when absent, loss uses the global ``strength`` for
+  # every sample (preserves backward compat with old posneg scripts). Mixed
+  # training launchers should add via Hydra:
+  #   +watermark.task_strength.green=5.0 +watermark.task_strength.initials=3.0
+  # Neg samples always get strength=0 (no biased-ref forward).
+
+  # Validation detectors: the reward function instantiates one detector per
+  # task listed in eval_tasks and the trainer reports
+  #   val/{task}_positive_z_score_mean / val/{task}_negative_z_score_mean / val/{task}_auc_roc
+  # for each. For single-task runs, set eval_tasks to a one-element list.
+  eval_tasks: [green]                                # e.g. [green] | [initials] | [green, initials]
+  eval_green_seed: 0                                 # must match the seed baked into val parquet's green prompts
+  eval_green_fraction: 0.25                          # must match fraction baked into val parquet's green prompts
+  eval_initials_seed: 0                              # partition key for Initials val detector
+
+# ---- Data ----
+data:
+  train_files: ???
+  val_files: ???
+  train_batch_size: 32
+  val_batch_size: null
+  train_max_samples: -1
+  val_max_samples: -1
+  max_length: 131072
+  max_prompt_length: 130000
+  max_response_length: 1072
+  dataloader_num_workers: 8
+  validation_shuffle: false
+  trust_remote_code: false
+
+  # Include raw_prompt in non-tensor batch so async agent loop postprocessor
+  # (which does kwargs["raw_prompt"]) doesn't KeyError.
+  # The raw_prompt_ids_agent uses raw_prompt_ids for generation; raw_prompt
+  # is only used for logging in _agent_loop_postprocess.
+  return_raw_chat: true
+
+  # Placeholders required by legacy_data defaults
+  train_data_num_samples: null
+  val_data_num_samples: null
+  shuffle: true
+  seed: 42
+  sampler: null
+
+# ---- Trainer ----
+trainer:
+  # Default ckpt save root: external 14TB /scr/tianyichen/ (mirrored on
+  # main-box and itml-1). Override via trainer.default_local_dir=... if
+  # launching on a host without /scr/tianyichen/.
+  default_local_dir: /scr/tianyichen/checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  default_hdfs_dir: null
+  project_name: watermark-kd-ray
+  experiment_name: test
+  total_epochs: 3
+  total_training_steps: null
+  logger: ["console", "wandb"]
+  log_val_generations: 0
+  validation_data_dir: null
+  rollout_data_dir: null
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: -1
+  test_freq: -1
+  resume_mode: auto
+  resume_from_path: null
+  val_before_train: true
+  val_only: false
+  device: cuda
+  use_legacy_worker_impl: auto
+  ray_wait_register_center_timeout: 300
+  del_local_ckpt_after_load: false
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  balance_batch: false
+  critic_warmup: 0
+  esi_redundant_time: 0
+
+
+
+# ---- Disabled PPO components ----
+
+# No critic
+critic:
+  enable: false
+  strategy: fsdp
+  use_dynamic_bsz: true
+  ppo_max_token_len_per_gpu: 65536
+  optim:
+    lr: 1.0e-5
+    total_training_steps: null
+  fsdp_config:
+    param_offload: false
+    optimizer_offload: false
+    fsdp_size: -1
+  checkpoint:
+    _target_: verl.trainer.config.CheckpointConfig
+    save_contents: ["model", "optimizer", "extra"]
+    load_contents: ["model", "optimizer", "extra"]
+
+# No reward model; use noop reward loop so async generation postprocessing skips inline reward scoring
+reward_model:
+  enable: false
+  model:
+    path: null
+  strategy: fsdp
+  micro_batch_size: null
+  micro_batch_size_per_gpu: null
+  enable_resource_pool: false
+  n_gpus_per_node: 8
+  nnodes: 1
+  reward_manager: noop
+
+# No in-reward KL (KL is in training loss, not reward)
+algorithm:
+  _target_: verl.trainer.config.AlgoConfig
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+  kl_penalty: kl
+  kl_ctrl:
+    _target_: verl.trainer.config.KLControlConfig
+    type: fixed
+    kl_coef: 0.001
+    horizon: 10000
+    target_kl: 0.1
+  use_pf_ppo: false
+  pf_ppo:
+    reweight_method: pow
+    weight_pow: 2.0
+  # Rollout correction fields (inlined — not used in KD training)
+  rollout_correction:
+    rollout_is: null
+    rollout_is_threshold: 2.0
+    rollout_rs: null
+    rollout_rs_threshold: null
+    rollout_rs_threshold_lower: null
+    rollout_token_veto_threshold: null
+    bypass_mode: false
+    use_policy_gradient: false
+    rollout_is_batch_normalize: false
+
+# ---- Profiler / Ray / Transfer queue (keep defaults) ----
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: "outputs/profile"
+  global_tool_config:
+    nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
+      discrete: false
+      controller_nsight_options:
+        trace: "cuda,nvtx,cublas,ucx"
+        cuda-memory-usage: "true"
+        cuda-graph-trace: "graph"
+      worker_nsight_options:
+        trace: "cuda,nvtx,cublas,ucx"
+        cuda-memory-usage: "true"
+        cuda-graph-trace: "graph"
+        capture-range: "cudaProfilerApi"
+        capture-range-end: null
+        kill: none
+    torch_memory:
+      trace_alloc_max_entries: 100_000
+      stack_depth: 32
+      context: "all"
+      stacks: "all"
+      kw_args: {}
+
+transfer_queue:
+  enable: false
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null
+
+custom_reward_function:
+  path: null
+  name: compute_score
+
+# Tell Hydra to also search verl's trainer config package so that
+# defaults like dp_actor, legacy_data, dp_ref, rollout, etc. resolve correctly.
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config

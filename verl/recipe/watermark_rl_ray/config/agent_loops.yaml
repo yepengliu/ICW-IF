@@ -1,0 +1,2 @@
+- name: raw_prompt_ids_agent
+  _target_: recipe.watermark_kd_ray.raw_prompt_ids_agent_loop.RawPromptIdsAgentLoop

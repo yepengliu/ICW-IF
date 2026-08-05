@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Experiment outputs
+outputs/
+logs/
+wandb/
+checkpoints/
+*.log
+
+# Large data (training parquets are hosted on Hugging Face)
+data_gen/outputs/
+*.parquet
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

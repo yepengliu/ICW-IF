@@ -1,0 +1,46 @@
+[project]
+name = "icw-sdlp"
+version = "1.0.0"
+description = "Learning to Follow In-Context Watermark Instructions via Self-Distillation (ICWBench + SDLP + RL)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    # Inference / generation
+    "vllm>=0.15.1,<0.16",
+    "torch>=2.10,<2.11",
+    "transformers>=4.57,<4.58",
+    "flash-attn>=2.8.3; platform_machine == 'x86_64'",
+    # Training (verl is vendored; install with `pip install -e ./verl`)
+    "ray[default]>=2.53",
+    "hydra-core==1.3.2",
+    "omegaconf==2.3.0",
+    "antlr4-python3-runtime==4.9.3",  # pinned: hydra/omegaconf break on 4.11+
+    "tensordict>=0.10",
+    "codetiming",
+    "peft>=0.18",
+    "accelerate>=1.12",
+    # Data
+    "datasets>=4.0",
+    "pandas>=2.3",
+    "pyarrow>=22.0",
+    "numpy>=2.0",
+    # Evaluation
+    "scipy>=1.15",
+    "scikit-learn>=1.7",
+    "nltk>=3.9",
+    "rapidfuzz>=3.14",
+    "openai>=2.0",
+    # Logging
+    "wandb>=0.24",
+]
+
+[dependency-groups]
+dev = ["ipdb", "ipykernel"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["watermark"]
