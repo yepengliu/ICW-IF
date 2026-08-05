@@ -198,10 +198,7 @@ data:
 
 # ---- Trainer ----
 trainer:
-  # Default ckpt save root: external 14TB /scr/tianyichen/ (mirrored on
-  # main-box and itml-1). Override via trainer.default_local_dir=... if
-  # launching on a host without /scr/tianyichen/.
-  default_local_dir: /scr/tianyichen/checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   default_hdfs_dir: null
   project_name: watermark-kd-ray
   experiment_name: test
