@@ -1,4 +1,4 @@
-"""Core library for ICW-SDLP.
+"""Core library for ICW-IF.
 
 Modules
 -------

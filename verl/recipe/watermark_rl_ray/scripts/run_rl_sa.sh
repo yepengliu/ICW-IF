@@ -58,7 +58,7 @@ mkdir -p logs
   reward.acrostics_detector_kind=lcs \
   trainer.nnodes=1 \
   trainer.n_gpus_per_node="${N_GPUS}" \
-  trainer.project_name=icw-sdlp-rl \
+  trainer.project_name=icw-if-rl \
   trainer.experiment_name="${EXP_NAME}" \
   trainer.total_epochs="${EPOCHS:-3}" \
   trainer.save_freq=after_each_epoch \

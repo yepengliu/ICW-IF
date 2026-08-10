@@ -1,5 +1,5 @@
 [project]
-name = "icw-sdlp"
+name = "icw-if"
 version = "1.0.0"
 description = "Learning to Follow In-Context Watermark Instructions via Self-Distillation (ICWBench + SDLP + RL)"
 readme = "README.md"

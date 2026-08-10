@@ -64,7 +64,7 @@ mkdir -p logs
     trainer.test_freq=50 \
     trainer.save_freq=after_each_epoch \
     trainer.val_before_train=true \
-    trainer.project_name=icw-sdlp \
+    trainer.project_name=icw-if \
     trainer.experiment_name="${EXP_NAME}" \
     "$@" \
     2>&1 | tee "logs/${EXP_NAME}.log"

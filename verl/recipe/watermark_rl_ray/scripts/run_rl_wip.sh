@@ -55,7 +55,7 @@ mkdir -p logs
   actor_rollout_ref.rollout.tensor_model_parallel_size="${N_GPUS}" \
   reward.active_tasks=[initials] \
   reward.stats_file="${STATS_FILE}" \
-  trainer.project_name=icw-sdlp-rl \
+  trainer.project_name=icw-if-rl \
   trainer.experiment_name="${EXP_NAME}" \
   trainer.n_gpus_per_node="${N_GPUS}" \
   trainer.total_epochs="${EPOCHS:-2}" \
