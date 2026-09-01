@@ -2,7 +2,7 @@
 
 Official implementation of the in-context watermark instruction following training algorithm presented in the paper:
 
-["Learning to Follow In-Context Watermark Instructions via Self-Distillation"]() by Yepeng Liu*, Tianyi Chen*, Xuandong Zhao, Dawn Song, and Yuheng Bu.
+["Learning to Follow In-Context Watermark Instructions via Self-Distillation"](https://arxiv.org/abs/2608.29030) by Yepeng Liu*, Tianyi Chen*, Xuandong Zhao, Dawn Song, and Yuheng Bu.
 
 
 ## Introduction
@@ -142,11 +142,11 @@ tools/         checkpoint conversion
 ## Citation
 
 ```bibtex
-@inproceedings{icw-sdlp,
-  title     = {Learning to Follow In-Context Watermark Instructions via Self-Distillation},
-  author    = {Liu, Yepeng and Chen, Tianyi and Zhao, Xuandong and Song, Dawn and Bu, Yuheng},
-  booktitle = {Under review},
-  year      = {2026}
+@article{liu2026icwif,
+  title={Learning to follow in-context watermark instructions via self-distillation},
+  author={Liu, Yepeng and Chen, Tianyi and Zhao, Xuandong and Song, Dawn and Bu, Yuheng},
+  journal={arXiv preprint arXiv:2608.29030},
+  year={2026}
 }
 ```
 
